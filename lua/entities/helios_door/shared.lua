@@ -280,25 +280,43 @@ if (SERVER) then
 		if ent:GetClass() == "helios_gateway" then debugPrint(self:EntIndex(), " E02 Cannot teleport ent because it is a gateway.") return end
 		if ent:GetClass() == "helios_door" then debugPrint(self:EntIndex(), " E03 Cannot teleport ent because it is a door.") return end
 
+		debugPrint(
+			self:EntIndex(),
+			" TOUCH ent=", ent,
+			" class=", ent:GetClass(),
+			" isPlayer=", tostring(ent:IsPlayer()),
+			" otherValid=", tostring(IsValid(self:GetOther())),
+			" enabled=", tostring(self:GetEnabled())
+		)
+
 		if (IsValid(self:GetOther()) and self:GetEnabled()) then
 			local faceNormal = self:GetAngles():Up()
-			-- Use the entity's bounding-box center for the plane check so
-			-- that off-axis offsets (e.g. feet far below a wall-mounted
-			-- portal) don't produce false results.  DistanceToPlane returns
-			-- positive when the position is on the front (normal) side of
-			-- the plane, negative when behind.
+
+			-- Signed distance from the entity to the portal plane.
+			-- Positive = same side the normal points toward ("front"),
+			-- Negative = opposite side ("behind").
+			-- Use WorldSpaceCenter for players so feet-position doesn't
+			-- skew the result on wall-mounted portals.
 			local checkPos = ent:IsPlayer() and ent:WorldSpaceCenter() or ent:GetPos()
-			local planeDist = DistanceToPlane(checkPos, self:GetPos(), faceNormal)
+			local ok, planeDist = pcall(DistanceToPlane, checkPos, self:GetPos(), faceNormal)
+
+			if not ok then
+				debugPrint(self:EntIndex(), " E05A DistanceToPlane failed: ", tostring(planeDist))
+				return
+			end
+
+			debugPrint(
+				self:EntIndex(),
+				" TRACE planeDist=", planeDist,
+				" checkPos=", checkPos,
+				" selfPos=", self:GetPos(),
+				" normal=", faceNormal
+			)
+
 			if (planeDist < 0) then
 				debugPrint(
 					self:EntIndex(),
-					" E05 Cannot teleport because entity is behind portal plane, checkPos: ",
-					checkPos,
-					" selfPos: ",
-					self:GetPos(),
-					" faceNormal: ",
-					faceNormal,
-					" planeDist: ",
+					" E05B Behind portal plane, planeDist: ",
 					planeDist
 				)
 			return end
@@ -307,8 +325,10 @@ if (SERVER) then
 
 			if (ent:IsPlayer()) then
 				if (CurTime() < (ent.lastPort + 0.4)) then
-					debugPrint(self:EntIndex(), " E06 Cannot teleport because cooldown not elapsed, left: ", ent.lastPort + 0.4 - CurTime())
+					debugPrint(self:EntIndex(), " E06 Cooldown not elapsed, left: ", ent.lastPort + 0.4 - CurTime())
 				return end
+
+				debugPrint(self:EntIndex(), " TRACE Player passed cooldown, proceeding with teleport")
 
 				local color = self:GetRealColor()
 				local vel = ent:GetVelocity()
@@ -343,8 +363,10 @@ if (SERVER) then
 
 				-- If the portal is slanted (non-floor/ceiling), push newPos out along
 				-- the now-corrected outward normal so it clears the wall geometry.
+				debugPrint(self:EntIndex(), " TRACE otherNormal=", otherNormal, " otherAngles.z=", other:GetAngles().z)
 				if (other:GetAngles().z > -60) then
 					newPos = newPos + otherNormal * 50
+					debugPrint(self:EntIndex(), " TRACE Slanted portal, pushed newPos by 50")
 				end
 
 				local offset = Vector()
@@ -363,10 +385,12 @@ if (SERVER) then
 				-- then ensure it is at least 16 units clear of the plane.
 				newPos = newPos + offset + otherNormal * 3
 
-				local planeDist = DistanceToPlane(newPos, other:GetPos(), otherNormal)
-				if (planeDist <= 16) then
-					newPos = newPos + otherNormal * (16 - planeDist)
+				local exitPlaneDist = DistanceToPlane(newPos, other:GetPos(), otherNormal)
+				if (exitPlaneDist <= 16) then
+					newPos = newPos + otherNormal * (16 - exitPlaneDist)
 				end
+
+				debugPrint(self:EntIndex(), " TRACE newPos=", newPos, " exitPlaneDist=", exitPlaneDist)
 
 				-- This trace allows 100% less getting stuck in things. It traces from the portal to the desired position using the player's hull.
 				-- If it hits, it'll set you somewhere safe-ish most of the time.
@@ -406,11 +430,16 @@ if (SERVER) then
 					end
 				end
 
+				debugPrint(self:EntIndex(), " TRACE foundSpot=", tostring(foundSpot), " traceAllSolid=", tostring(trace.AllSolid), " traceHitPos=", trace.HitPos)
+
 				if (!foundSpot) then
 					debugPrint(self:EntIndex(), " E07 Cannot teleport because safe spot not found.")
 				return end
 
-				ent:SetPos(trace.HitPos + up * 2)
+				local finalTeleportPos = trace.HitPos + up * 2
+				debugPrint(self:EntIndex(), " TRACE TELEPORTING player to ", finalTeleportPos)
+
+				ent:SetPos(finalTeleportPos)
 				ent:SetLocalVelocity(newVel)
 				ent:SetEyeAngles(newAngles)
 				ent.lastPort = CurTime()
@@ -578,9 +607,9 @@ elseif (CLIENT) then
 
 	function ENT:Initialize()
 		self.PixVis = util.GetPixelVisibleHandle()
-		local matrix = Matrix()
-		matrix:Scale(Vector(1, 1, 0.01))
-		local offset = 1.8
+		self._matrix = Matrix()
+		self._matrix:Scale(Vector(1, 1, 0.01))
+		self._offset = 1.8
 
 		local effectData = EffectData()
 		effectData:SetEntity(self)
@@ -590,19 +619,19 @@ elseif (CLIENT) then
 		self:SetSolid(SOLID_VPHYSICS)
 
 		self.hole = ClientsideModel("models/helios/effects/portal_top_inside.mdl", RENDERGROUP_BOTH)
-		self.hole:SetPos(self:GetPos() - self:GetUp() * (0 + offset))
+		self.hole:SetPos(self:GetPos() - self:GetUp() * (0 + self._offset))
 		self.hole:SetAngles(self:GetAngles())
 		self.hole:SetParent(self)
 		self.hole:SetNoDraw(true)
-		self.hole:EnableMatrix("RenderMultiply", matrix)
+		self.hole:EnableMatrix("RenderMultiply", self._matrix)
 
 		self.top = ClientsideModel("models/helios/effects/portal_side_inside.mdl", RENDERGROUP_BOTH)
 		self.top:SetMaterial("portal/border3")
-		self.top:SetPos(self:GetPos() + self:GetRight() * -0 - self:GetUp() * (0 + offset))
+		self.top:SetPos(self:GetPos() + self:GetRight() * -0 - self:GetUp() * (0 + self._offset))
 		self.top:SetParent(self)
 		self.top:SetLocalAngles(Angle(0, 0, 0))
 		self.top:SetNoDraw(true)
-		-- self.top:EnableMatrix("RenderMultiply", matrix)
+		-- self.top:EnableMatrix("RenderMultiply", self._matrix)
 
 		self.back = ClientsideModel("models/hunter/plates/plate3x3.mdl", RENDERGROUP_BOTH)
 		self.back:SetMaterial("vgui/black")
@@ -645,21 +674,21 @@ elseif (CLIENT) then
 
 		if (!IsValid(self.hole)) then
 			self.hole = ClientsideModel("models/hunter/plates/plate1x2.mdl", RENDERGROUP_BOTH)
-			self.hole:SetPos(self:GetPos() - self:GetUp() * (1 + offset))
+			self.hole:SetPos(self:GetPos() - self:GetUp() * (1 + self._offset))
 			self.hole:SetAngles(self:GetAngles())
 			self.hole:SetParent(self)
 			self.hole:SetNoDraw(true)
-			self.hole:EnableMatrix("RenderMultiply", matrix)
+			self.hole:EnableMatrix("RenderMultiply", self._matrix)
 		end
 
 		if (!IsValid(self.top)) then
 			self.top = ClientsideModel("models/hunter/plates/plate075x1.mdl", RENDERGROUP_BOTH)
 			self.top:SetMaterial("portal/border3")
-			self.top:SetPos(self:GetPos() + self:GetRight() * 44.5 - self:GetUp() * (12.5 + offset))
+			self.top:SetPos(self:GetPos() + self:GetRight() * 44.5 - self:GetUp() * (12.5 + self._offset))
 			self.top:SetParent(self)
 			self.top:SetLocalAngles(Angle(-75, -90, 0))
 			self.top:SetNoDraw(true)
-			self.top:EnableMatrix("RenderMultiply", matrix)
+			self.top:EnableMatrix("RenderMultiply", self._matrix)
 		end
 
 
