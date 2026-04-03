@@ -282,17 +282,24 @@ if (SERVER) then
 
 		if (IsValid(self:GetOther()) and self:GetEnabled()) then
 			local faceNormal = self:GetAngles():Up()
-			if (InFront(ent:GetPos(), self:GetPos() - faceNormal * 2.8, faceNormal)) then
+			-- Use the entity's bounding-box center for the plane check so
+			-- that off-axis offsets (e.g. feet far below a wall-mounted
+			-- portal) don't produce false results.  DistanceToPlane returns
+			-- positive when the position is on the front (normal) side of
+			-- the plane, negative when behind.
+			local checkPos = ent:IsPlayer() and ent:WorldSpaceCenter() or ent:GetPos()
+			local planeDist = DistanceToPlane(checkPos, self:GetPos(), faceNormal)
+			if (planeDist < 0) then
 				debugPrint(
 					self:EntIndex(),
-					" E05 Cannot teleport because InFront is incorrect, entPos: ",
-					ent:GetPos(),
+					" E05 Cannot teleport because entity is behind portal plane, checkPos: ",
+					checkPos,
 					" selfPos: ",
 					self:GetPos(),
-					" selfGetUp (angles): ",
+					" faceNormal: ",
 					faceNormal,
-					" dot product: ",
-					faceNormal:Dot((self:GetPos() - faceNormal * 2.8 - ent:GetPos()):GetNormalized())
+					" planeDist: ",
+					planeDist
 				)
 			return end
 
