@@ -69,37 +69,31 @@ if SERVER then
 		return nil
 	end
 
-	function gpi.RemovePortalCodeFromIndex(code)
-		local numericCode = tonumber(code)
-		if not numericCode then
-			return false
-		end
-
-		if gpi.GLOBAL_PORTAL_INDEX[numericCode] then
-			gpi.GLOBAL_PORTAL_INDEX[numericCode] = nil
-			return true
-		end
-
-		return false
-	end
-
-	function gpi.HasPortalCode(code)
-		local numericCode = tonumber(code)
-		return numericCode ~= nil and gpi.GLOBAL_PORTAL_INDEX[numericCode] ~= nil
-	end
 end
 
 if SERVER then
 	util.AddNetworkString("HeliosGateway_SendLinkCommand")
 	util.AddNetworkString("HeliosGateway_SendLinkCommand_Reply")
 
-	net.Receive("HeliosGateway_SendLinkCommand", function(ln, ply)
-		ent = net.ReadEntity()
-		linkcode = tonumber(net.ReadString())
+	local MAX_USE_DISTANCE_SQR = 200 * 200
 
-		if ply:GetEyeTraceNoCursor().Entity != ent then
-			return
-		end
+	-- Eye traces desync between client and server (latency, the keypad being a
+	-- floating 3D2D plane, parented doors blocking the ray), so validate with a
+	-- class + distance check instead.
+	local function canUseGateway(ply, ent)
+		if not IsValid(ply) or not IsValid(ent) then return false end
+		if ent:GetClass() ~= "helios_gateway" then return false end
+		if ply:GetPos():DistToSqr(ent:GetPos()) > MAX_USE_DISTANCE_SQR then return false end
+
+		return true
+	end
+
+	net.Receive("HeliosGateway_SendLinkCommand", function(ln, ply)
+		local ent = net.ReadEntity()
+		local linkcode = tonumber(net.ReadString())
+
+		if not canUseGateway(ply, ent) then return end
+		if not linkcode then return end
 
 		local other = gpi.GetPortalByCode(linkcode)
 
@@ -115,13 +109,14 @@ if SERVER then
 	util.AddNetworkString("HeliosGateway_SendUnlinkCommand")
 
 	net.Receive("HeliosGateway_SendUnlinkCommand", function(ln, ply)
-		ent = net.ReadEntity()
+		local ent = net.ReadEntity()
 
-		if ply:GetEyeTraceNoCursor().Entity != ent then
-			return
-		end
+		if not canUseGateway(ply, ent) then return end
 
-		ent:Toggle(ent:GetOther():GetCode())
+		local other = ent:GetOther()
+		if not IsValid(other) then return end
+
+		ent:Toggle(other:GetCode())
 
 	end)
 end
@@ -143,28 +138,78 @@ function ENT:GravGunPickupAllowed()
     return false
 end
 
+if SERVER then
+	-- Spawn-menu placement only. Duplicator/PermaProps restores bypass this,
+	-- so saved angles are preserved exactly (no compounding rotation).
+	function ENT:SpawnFunction(ply, tr, class)
+		if not tr.Hit then return end
+
+		local ent = ents.Create(class)
+		if not IsValid(ent) then return end
+
+		ent:SetPos(tr.HitPos)
+		-- Face the player; +90 compensates for the model's orientation.
+		ent:SetAngles(Angle(0, ply:EyeAngles().yaw + 90, 0))
+		ent:Spawn()
+		ent:Activate()
+
+		return ent
+	end
+
+	-- Runs on the first Think, after duplicator/PermaProps has restored DT vars.
+	-- Keeps gpi.GLOBAL_PORTAL_INDEX consistent with the entity's final code,
+	-- and resets stale state restored from a save (e.g. STATE_OPEN with no
+	-- doors/partner after a map restart).
+	function ENT:ReconcileCode()
+		if self:GetCurrentState() ~= STATE_CLOSED and not IsValid(self:GetOther()) then
+			self:SetCurrentState(STATE_CLOSED)
+			self:SetPortalEnt(NULL)
+			self:SetPortalEnt2(NULL)
+		end
+
+		local code = self:GetCode()
+
+		-- Already consistent?
+		if code and code > 0 and gpi.GLOBAL_PORTAL_INDEX[code] == self then return end
+
+		-- Purge any index entries pointing at us (e.g. the code generated in
+		-- Initialize that was then overwritten by a duplicator restore).
+		for c, e in pairs(gpi.GLOBAL_PORTAL_INDEX) do
+			if e == self then
+				gpi.GLOBAL_PORTAL_INDEX[c] = nil
+			end
+		end
+
+		local owner = code and code > 0 and gpi.GLOBAL_PORTAL_INDEX[code] or nil
+		if code and code > 0 and not IsValid(owner) then
+			-- Claim the restored code so it survives map restarts.
+			gpi.GLOBAL_PORTAL_INDEX[code] = self
+		else
+			-- No code, or it's taken by another live portal: generate a fresh one.
+			self:SetCode(gpi.GeneratePortalCode(self) or 0)
+		end
+	end
+end
+
 function ENT:Initialize()
 	self:SetModel("models/helios/props/rep_portal.mdl")
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
 	self:SetSolid(SOLID_VPHYSICS)
 	self:SetCurrentState(STATE_CLOSED)
-	self:SetAngles(self:GetAngles() + Angle(0,90,0))
 
 	if SERVER then
-		if table.Count(gpi.GLOBAL_PORTAL_INDEX) >= gpi.MAX_PORTAL_CODES then
-			return
-		end
-
+		-- NOTE: Do not trust this code; duplicator/PermaProps restores the saved
+		-- Code DT var AFTER Initialize runs. ReconcileCode() (first Think) fixes
+		-- the index up once the final code value is known.
 		local newcode = gpi.GeneratePortalCode(self)
-
-		self:SetCode(newcode)
+		self:SetCode(newcode or 0)
 	end
 
 	local phys = self:GetPhysicsObject()
 	if ( IsValid(phys) ) then
-        phys:Wake()
         phys:SetMass(1000)
+        phys:Sleep()
     end
 
 	if CLIENT then
@@ -184,39 +229,38 @@ local GATE2_POSITION = Vector(0,-2,39)
 local GATE_ANGLE = Angle(0,0,-90)
 local GATE2_ANGLE = Angle(0,0,90)
 
+local DOOR_COLOR = Color(0, 255, 30)
+
+local function createGatewayDoor(gateway, localPos, localAng)
+	local door = ents.Create("helios_door")
+	if not IsValid(door) then return NULL end
+
+	door:SetPos(gateway:LocalToWorld(localPos))
+	door:Spawn()
+	door:SetAngles(gateway:LocalToWorldAngles(localAng))
+	door:SetNotSolid(true)
+	door:SetColour(DOOR_COLOR)
+
+	-- A parented entity must not keep an active physics object,
+	-- otherwise it fights the parent transform and jitters.
+	-- (Keep the phys object itself: SetTrigger touch detection needs the
+	-- collision model.)
+	local phys = door:GetPhysicsObject()
+	if IsValid(phys) then
+		phys:EnableMotion(false)
+		phys:Sleep()
+	end
+	door:SetMoveType(MOVETYPE_NONE)
+	door:SetParent(gateway)
+
+	return door
+end
+
 function ENT:CreatePairWith(other)
-	local portal_self = ents.Create("helios_door")
-	local portal_self2 = ents.Create("helios_door")
-	local portal_other = ents.Create("helios_door")
-	local portal_other2 = ents.Create("helios_door")
-
-	portal_self:SetPos(self:LocalToWorld(GATE_POSITION))
-	portal_self:Spawn()
-	portal_self:SetAngles(self:LocalToWorldAngles(GATE_ANGLE))
-	portal_self:SetNotSolid(true)
-	portal_self:SetColour(Color(0,255,30))
-	portal_self:SetParent(self)
-
-	portal_self2:SetPos(self:LocalToWorld(GATE2_POSITION))
-	portal_self2:Spawn()
-	portal_self2:SetAngles(self:LocalToWorldAngles(GATE2_ANGLE))
-	portal_self2:SetNotSolid(true)
-	portal_self2:SetColour(Color(0,255,30))
-	portal_self2:SetParent(self)
-
-	portal_other:SetPos(other:LocalToWorld(GATE_POSITION))
-	portal_other:Spawn()
-	portal_other:SetAngles(other:LocalToWorldAngles(GATE_ANGLE))
-	portal_other:SetNotSolid(true)
-	portal_other:SetColour(Color(0,255,30))
-	portal_other:SetParent(other)
-
-	portal_other2:SetPos(other:LocalToWorld(GATE2_POSITION))
-	portal_other2:Spawn()
-	portal_other2:SetAngles(other:LocalToWorldAngles(GATE2_ANGLE))
-	portal_other2:SetNotSolid(true)
-	portal_other2:SetColour(Color(0,255,30))
-	portal_other2:SetParent(other)
+	local portal_self = createGatewayDoor(self, GATE_POSITION, GATE_ANGLE)
+	local portal_self2 = createGatewayDoor(self, GATE2_POSITION, GATE2_ANGLE)
+	local portal_other = createGatewayDoor(other, GATE_POSITION, GATE_ANGLE)
+	local portal_other2 = createGatewayDoor(other, GATE2_POSITION, GATE2_ANGLE)
 
 	portal_self:SetOther(portal_other)
 	portal_other:SetOther(portal_self)
@@ -234,22 +278,19 @@ function ENT:CreatePairWith(other)
 end
 
 function ENT:RemovePairWith(other)
-	local portal_other = self:GetPortalEnt()
-	local portal_other2 = self:GetPortalEnt2()
-	local portal_self = other:GetPortalEnt()
-	local portal_self2 = other:GetPortalEnt2()
+	local doors = {
+		self:GetPortalEnt(),
+		self:GetPortalEnt2(),
+		other:GetPortalEnt(),
+		other:GetPortalEnt2(),
+	}
 
-	portal_other:Disable()
-	portal_self:Disable()
-
-	portal_other2:Disable()
-	portal_self2:Disable()
-
-	portal_other:Remove()
-	portal_self:Remove()
-
-	portal_other2:Remove()
-	portal_self2:Remove()
+	for _, door in ipairs(doors) do
+		if IsValid(door) then
+			door:Disable()
+			door:Remove()
+		end
+	end
 end
 
 function ENT:Toggle(linkcode, remote_open)
@@ -265,10 +306,16 @@ function ENT:Toggle(linkcode, remote_open)
 		self:CreatePairWith(other)
 		other:Toggle(self:GetCode(), true)
 	elseif not remote_open and curState == STATE_OPEN then
-		self:RemovePairWith(other)
-		other:Toggle(self:GetCode(), true)
-		other:SetOther(nil)
-		self:SetOther(nil)
+		if not IsValid(other) then
+			-- Partner is gone (deleted/cleaned up); close just this side.
+			self:RemovePairWith(self)
+			self:SetOther(nil)
+		else
+			self:RemovePairWith(other)
+			other:Toggle(self:GetCode(), true)
+			other:SetOther(nil)
+			self:SetOther(nil)
+		end
 	end
 
 	if self:GetCurrentState() == STATE_CLOSED then
@@ -307,6 +354,11 @@ function ENT:Toggle(linkcode, remote_open)
 end
 
 function ENT:Think()
+	if SERVER and not self._codeReconciled then
+		self._codeReconciled = true
+		self:ReconcileCode()
+	end
+
     self:FrameAdvance()
     self:NextThink(CurTime())
     return true
@@ -423,6 +475,12 @@ end
 
 function ENT:OnRemove()
 	if SERVER then
-		gpi.RemovePortalCodeFromIndex(self:GetCode())
+		-- Purge by entity reference (not by code) so stale or mismatched
+		-- entries can never linger in the index.
+		for c, e in pairs(gpi.GLOBAL_PORTAL_INDEX) do
+			if e == self or not IsValid(e) then
+				gpi.GLOBAL_PORTAL_INDEX[c] = nil
+			end
+		end
 	end
 end

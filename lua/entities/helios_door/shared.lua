@@ -191,13 +191,6 @@ if (SERVER) then
 		end
 	end
 
-	function ENT:KeyValue(key, value)
-		if (key == "color") then
-			local args = string.Explode(" ", value, false)
-			self:SetColour(Color(args[1], args[2], args[3]))
-		end
-	end
-
 	function ENT:TransformOffset(v, a1, a2)
 		return (v:Dot(a1:Right()) * a2:Right() + v:Dot(a1:Up()) * (-a2:Up()) - v:Dot(a1:Forward()) * a2:Forward())
 	end
@@ -569,11 +562,14 @@ elseif (CLIENT) then
 		render.ClearStencil()
 	end
 
+	local flattenMatrix = Matrix()
+	flattenMatrix:Scale(Vector(1, 1, 0.01))
+	local CSMODEL_OFFSET = 1.8
+
 	function ENT:Initialize()
 		self.PixVis = util.GetPixelVisibleHandle()
-		local matrix = Matrix()
-		matrix:Scale(Vector(1, 1, 0.01))
-		local offset = 1.8
+		local matrix = flattenMatrix
+		local offset = CSMODEL_OFFSET
 
 		local effectData = EffectData()
 		effectData:SetEntity(self)
@@ -609,9 +605,9 @@ elseif (CLIENT) then
 	end
 
 	function ENT:OnRemove()
-		self.top:Remove()
-		self.hole:Remove()
-		self.back:Remove()
+		if IsValid(self.top) then self.top:Remove() end
+		if IsValid(self.hole) then self.hole:Remove() end
+		if IsValid(self.back) then self.back:Remove() end
 	end
 
 	function ENT:Draw()
@@ -638,21 +634,21 @@ elseif (CLIENT) then
 
 		if (!IsValid(self.hole)) then
 			self.hole = ClientsideModel("models/hunter/plates/plate1x2.mdl", RENDERGROUP_BOTH)
-			self.hole:SetPos(self:GetPos() - self:GetUp() * (1 + offset))
+			self.hole:SetPos(self:GetPos() - self:GetUp() * (1 + CSMODEL_OFFSET))
 			self.hole:SetAngles(self:GetAngles())
 			self.hole:SetParent(self)
 			self.hole:SetNoDraw(true)
-			self.hole:EnableMatrix("RenderMultiply", matrix)
+			self.hole:EnableMatrix("RenderMultiply", flattenMatrix)
 		end
 
 		if (!IsValid(self.top)) then
 			self.top = ClientsideModel("models/hunter/plates/plate075x1.mdl", RENDERGROUP_BOTH)
 			self.top:SetMaterial("portal/border3")
-			self.top:SetPos(self:GetPos() + self:GetRight() * 44.5 - self:GetUp() * (12.5 + offset))
+			self.top:SetPos(self:GetPos() + self:GetRight() * 44.5 - self:GetUp() * (12.5 + CSMODEL_OFFSET))
 			self.top:SetParent(self)
 			self.top:SetLocalAngles(Angle(-75, -90, 0))
 			self.top:SetNoDraw(true)
-			self.top:EnableMatrix("RenderMultiply", matrix)
+			self.top:EnableMatrix("RenderMultiply", flattenMatrix)
 		end
 
 

@@ -18,6 +18,17 @@ if (SERVER) then
 	if (!ConVarExists("sbox_maxhel_portalpairs")) then
 		CreateConVar("sbox_maxhel_portalpairs", 50, {FCVAR_ARCHIVE, FCVAR_REPLICATED}, "Maximum number of portal pairs which can be created by users.")
 	end
+
+	-- Toggles a tool-created helios_door pair via the bound numpad key.
+	numpad.Register("PortalToggle", function(player, portal)
+		if (not IsValid(portal)) then return false end
+
+		if (portal:GetEnabled()) then
+			portal:Disable()
+		else
+			portal:Enable()
+		end
+	end)
 end
 
 /*
@@ -48,7 +59,7 @@ function TOOL:LeftClick(trace)
 	else
 		-- Same as before, but create some nice variables for us to use.
 		local physObj = trace.Entity:GetPhysicsObjectNum(trace.PhysicsBone)
-		local color = Color(self:GetClientInfo("r"), self:GetClientInfo("g"), self:GetClientInfo("b"))
+		local color = Color(self:GetClientNumber("r", 167), self:GetClientNumber("g", 100), self:GetClientNumber("b", 30))
 		local key = self:GetClientInfo("key")
 
 		-- Store the data of our second click.

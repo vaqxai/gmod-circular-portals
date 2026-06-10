@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Pollux12/gmod-glua-ls/main/crates/glua_code_analysis/resources/schema.json",
+  "workspace": {
+    "library": [
+      "E:/Documents/gmod_skrypty/support/darkrp_248302805"
+    ]
+  }
+}
