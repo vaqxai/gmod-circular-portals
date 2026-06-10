@@ -77,9 +77,7 @@ if SERVER then
 
 	local MAX_USE_DISTANCE_SQR = 200 * 200
 
-	-- Eye traces desync between client and server (latency, the keypad being a
-	-- floating 3D2D plane, parented doors blocking the ray), so validate with a
-	-- class + distance check instead.
+	-- Eye traces desync between client and server, so validate by distance instead.
 	local function canUseGateway(ply, ent)
 		if not IsValid(ply) or not IsValid(ent) then return false end
 		if ent:GetClass() ~= "helios_gateway" then return false end
@@ -139,8 +137,7 @@ function ENT:GravGunPickupAllowed()
 end
 
 if SERVER then
-	-- Spawn-menu placement only. Duplicator/PermaProps restores bypass this,
-	-- so saved angles are preserved exactly (no compounding rotation).
+	-- Spawn-menu only; duplicator/PermaProps restores bypass this and keep saved angles.
 	function ENT:SpawnFunction(ply, tr, class)
 		if not tr.Hit then return end
 
@@ -148,18 +145,16 @@ if SERVER then
 		if not IsValid(ent) then return end
 
 		ent:SetPos(tr.HitPos)
-		-- Face the player; +90 compensates for the model's orientation.
-		ent:SetAngles(Angle(0, ply:EyeAngles().yaw + 90, 0))
+		ent:SetAngles(Angle(0, ply:EyeAngles().yaw + 90, 0)) -- +90 = model orientation offset
 		ent:Spawn()
 		ent:Activate()
 
 		return ent
 	end
 
-	-- Runs on the first Think, after duplicator/PermaProps has restored DT vars.
-	-- Keeps gpi.GLOBAL_PORTAL_INDEX consistent with the entity's final code,
-	-- and resets stale state restored from a save (e.g. STATE_OPEN with no
-	-- doors/partner after a map restart).
+	-- Runs on first Think, after duplicator/PermaProps restored DT vars
+	-- (which happens AFTER Initialize). Syncs the code index with the final
+	-- code value and resets stale restored state.
 	function ENT:ReconcileCode()
 		if self:GetCurrentState() ~= STATE_CLOSED and not IsValid(self:GetOther()) then
 			self:SetCurrentState(STATE_CLOSED)
@@ -169,11 +164,8 @@ if SERVER then
 
 		local code = self:GetCode()
 
-		-- Already consistent?
 		if code and code > 0 and gpi.GLOBAL_PORTAL_INDEX[code] == self then return end
 
-		-- Purge any index entries pointing at us (e.g. the code generated in
-		-- Initialize that was then overwritten by a duplicator restore).
 		for c, e in pairs(gpi.GLOBAL_PORTAL_INDEX) do
 			if e == self then
 				gpi.GLOBAL_PORTAL_INDEX[c] = nil
@@ -182,10 +174,8 @@ if SERVER then
 
 		local owner = code and code > 0 and gpi.GLOBAL_PORTAL_INDEX[code] or nil
 		if code and code > 0 and not IsValid(owner) then
-			-- Claim the restored code so it survives map restarts.
 			gpi.GLOBAL_PORTAL_INDEX[code] = self
 		else
-			-- No code, or it's taken by another live portal: generate a fresh one.
 			self:SetCode(gpi.GeneratePortalCode(self) or 0)
 		end
 	end
@@ -199,11 +189,8 @@ function ENT:Initialize()
 	self:SetCurrentState(STATE_CLOSED)
 
 	if SERVER then
-		-- NOTE: Do not trust this code; duplicator/PermaProps restores the saved
-		-- Code DT var AFTER Initialize runs. ReconcileCode() (first Think) fixes
-		-- the index up once the final code value is known.
-		local newcode = gpi.GeneratePortalCode(self)
-		self:SetCode(newcode or 0)
+		-- Provisional; ReconcileCode() finalizes it on first Think.
+		self:SetCode(gpi.GeneratePortalCode(self) or 0)
 	end
 
 	local phys = self:GetPhysicsObject()
@@ -241,10 +228,8 @@ local function createGatewayDoor(gateway, localPos, localAng)
 	door:SetNotSolid(true)
 	door:SetColour(DOOR_COLOR)
 
-	-- A parented entity must not keep an active physics object,
-	-- otherwise it fights the parent transform and jitters.
-	-- (Keep the phys object itself: SetTrigger touch detection needs the
-	-- collision model.)
+	-- Active physics on a parented entity fights the parent transform (jitter).
+	-- Keep the phys object itself: trigger touch detection needs the collision model.
 	local phys = door:GetPhysicsObject()
 	if IsValid(phys) then
 		phys:EnableMotion(false)
@@ -307,7 +292,7 @@ function ENT:Toggle(linkcode, remote_open)
 		other:Toggle(self:GetCode(), true)
 	elseif not remote_open and curState == STATE_OPEN then
 		if not IsValid(other) then
-			-- Partner is gone (deleted/cleaned up); close just this side.
+			-- Partner gone; close just this side.
 			self:RemovePairWith(self)
 			self:SetOther(nil)
 		else
@@ -475,8 +460,7 @@ end
 
 function ENT:OnRemove()
 	if SERVER then
-		-- Purge by entity reference (not by code) so stale or mismatched
-		-- entries can never linger in the index.
+		-- Purge by entity reference so mismatched entries can't linger.
 		for c, e in pairs(gpi.GLOBAL_PORTAL_INDEX) do
 			if e == self or not IsValid(e) then
 				gpi.GLOBAL_PORTAL_INDEX[c] = nil
